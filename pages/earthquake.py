@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 # --- 페이지 설정 ---
 st.set_page_config(page_title="내 위치 기반 지진 탐색기", page_icon="🌍", layout="wide")
 st.title("🌍 지진 반경 탐색기 & 실시간 대피 정보")
-st.markdown("지도의 지진 아이콘을 클릭하면 지도 아래에 **상세 상황 및 대피소 정보**가 나타납니다.")
+st.markdown("지도의 지진 아이콘을 클릭하면 지도 아래에 **상세 상황**이 즉시 나타납니다.")
 
 # --- 지진 규모별 상황 및 대피 요령 함수 ---
 def get_magnitude_info(mag):
@@ -25,8 +25,7 @@ def get_magnitude_info(mag):
     else:
         return "광범위한 파괴가 발생하고 대규모 건물이 붕괴됩니다.", "최대한 빨리 넓은 야외로 대피하고, 해안가인 경우 즉시 높은 곳으로 이동해 쓰나미에 대비합니다."
 
-# --- 오픈스트리트맵(OSM) 대피소(학교/공원) 데이터 호출 함수 ---
-@st.cache_data(show_spinner="주변 대피소 정보를 불러오는 중...")
+# --- 오픈스트리트맵(OSM) 대피소 데이터 호출 함수 ---
 def fetch_shelters(lat, lon, radius_m=5000):
     overpass_url = "http://overpass-api.de/api/interpreter"
     overpass_query = f"""
@@ -38,7 +37,7 @@ def fetch_shelters(lat, lon, radius_m=5000):
     out center limit 15;
     """
     try:
-        response = requests.get(overpass_url, params={'data': overpass_query})
+        response = requests.get(overpass_url, params={'data': overpass_query}, timeout=5)
         shelters = []
         if response.status_code == 200:
             data = response.json()
@@ -99,7 +98,7 @@ def fetch_earthquake_data(lat, lon, radius, min_magnitude, start, end):
             props = f["properties"]
             coords = f["geometry"]["coordinates"]
             eq_list.append({
-                "id": f["id"], # 클릭 감지를 위한 고유 ID 추가
+                "id": f["id"],
                 "place": props["place"],
                 "magnitude": props["mag"],
                 "time": datetime.fromtimestamp(props["time"]/1000).strftime("%Y-%m-%d %H:%M"),
@@ -110,7 +109,6 @@ def fetch_earthquake_data(lat, lon, radius, min_magnitude, start, end):
         return pd.DataFrame(eq_list)
     return pd.DataFrame()
 
-# 데이터 불러오기
 df = fetch_earthquake_data(lat, lon, radius_km, min_mag, start_date, end_date)
 
 # --- 상단 대시보드 요약 통계 ---
@@ -130,7 +128,6 @@ st.markdown("---")
 # --- 지도 시각화 (Folium) ---
 m = folium.Map(location=[lat, lon], zoom_start=6, tiles="CartoDB positron")
 
-# 탐색 반경 원 그리기
 folium.Circle(
     location=[lat, lon],
     radius=radius_km * 1000,
@@ -140,7 +137,6 @@ folium.Circle(
     fill_opacity=0.03,
 ).add_to(m)
 
-# 지진 데이터 마커 추가
 if not df.empty:
     for _, row in df.iterrows():
         mag = row['magnitude']
@@ -151,7 +147,6 @@ if not df.empty:
         else:
             color = "green"
             
-        # 팝업 대신 지도 하단 출력을 위해 팝업 제거 및 layer_id 설정
         folium.CircleMarker(
             location=[row['latitude'], row['longitude']],
             radius=mag * 2.5,
@@ -159,25 +154,28 @@ if not df.empty:
             fill=True,
             fill_color=color,
             fill_opacity=0.6,
-            # 마우스를 올렸을 때 간단한 힌트만 제공
-            tooltip=f"규모 {mag} - 클릭하여 상세 정보 보기"
+            tooltip=f"규모 {mag} - 클릭"
         ).add_to(m)
 
-# 스트림릿에 지도 출력 및 사용자 클릭 이벤트 캡처
-map_data = st_folium(m, width=1000, height=500, key="earthquake_map")
+# 🚀 최적화 포인트 1: returned_objects를 지정하여 불필요한 데이터 렌더링 방지
+map_data = st_folium(
+    m, 
+    width=1000, 
+    height=500, 
+    key="earthquake_map",
+    returned_objects=["last_object_clicked"] 
+)
 
 st.markdown("---")
 
 # --- 지도 하단 상세 정보 대시보드 ---
 st.subheader("📋 선택한 지역의 상세 정보 및 대피 안내")
 
-# 사용자가 지도의 마커를 클릭했는지 확인하는 로직
 clicked_marker = None
 if map_data and map_data.get("last_object_clicked"):
     click_lat = map_data["last_object_clicked"]["lat"]
     click_lon = map_data["last_object_clicked"]["lng"]
     
-    # 클릭한 좌표와 일치하는 지진 데이터 필터링 (미세한 소수점 오차 방지를 위해 round 적용)
     if not df.empty:
         matched = df[
             (df['latitude'].round(3) == round(click_lat, 3)) & 
@@ -186,12 +184,10 @@ if map_data and map_data.get("last_object_clicked"):
         if not matched.empty:
             clicked_marker = matched.iloc[0]
 
-# 마커가 클릭되었다면 상세 대시보드 출력
 if clicked_marker is not None:
     mag = clicked_marker['magnitude']
     situation, action = get_magnitude_info(mag)
     
-    # 레이아웃 분할 (상황/대피요령 vs 주변 대피소 리스트)
     detail_col1, detail_col2 = st.columns([2, 1])
     
     with detail_col1:
@@ -200,23 +196,25 @@ if clicked_marker is not None:
         st.write(f"**🕒 발생 시각:** {clicked_marker['time']}")
         st.write(f"**📏 진원 깊이:** {clicked_marker['depth']} km")
         
-        # 시각적 구분을 위한 안내 박스
         st.error(f"**⚠️ 예상되는 상황:**\n\n{situation}")
         st.success(f"**🏃‍♂️ 권장 대피 요령:**\n\n{action}")
         
     with detail_col2:
         st.markdown("### 🏥 인근 대피 구역 (학교/공원)")
-        st.caption("발생지 기준 반경 5km 이내의 안전 지역 목록입니다.")
+        st.caption("발생지 기준 반경 5km 이내의 안전 지역")
         
-        # 지진 발생지 주변 대피소 검색
-        local_shelters = fetch_shelters(clicked_marker['latitude'], clicked_marker['longitude'])
-        
-        if local_shelters:
-            for idx, shelter in enumerate(local_shelters, 1):
-                st.markdown(f"**{idx}. {shelter['name']}**")
+        # 🚀 최적화 포인트 2: 대피소 검색을 수동 버튼으로 변경하여 맵 클릭 렉 방지
+        if st.button("🔍 주변 대피소 검색하기"):
+            with st.spinner("대피소 정보를 불러오는 중..."):
+                local_shelters = fetch_shelters(clicked_marker['latitude'], clicked_marker['longitude'])
+                
+                if local_shelters:
+                    for idx, shelter in enumerate(local_shelters, 1):
+                        st.markdown(f"**{idx}. {shelter['name']}**")
+                else:
+                    st.info("반경 5km 내에 등록된 대피 구역 정보가 없습니다. 넓은 공터로 대피하세요.")
         else:
-            st.info("반경 5km 내에 등록된 대피 구역 정보가 없습니다. 넓은 공터로 대피하세요.")
+            st.info("버튼을 눌러 근처 대피소를 확인하세요.")
             
 else:
-    # 아무것도 클릭하지 않았을 때의 초기 상태 안내
-    st.info("🗺️ 위의 지도에서 지진 마커(초록/주황/빨간 원)를 클릭하시면 해당 지역의 실시간 재난 상황과 대피소 목록이 이곳에 표시됩니다.")
+    st.info("🗺️ 위의 지도에서 지진 마커를 클릭하시면 상세 정보가 표시됩니다.")
