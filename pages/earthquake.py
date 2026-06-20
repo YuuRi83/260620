@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 # --- 페이지 설정 ---
 st.set_page_config(page_title="내 위치 기반 지진 탐색기", page_icon="🌍", layout="wide")
-st.title("🌍 지진 반경 탐색기 & 대피소 안내")
-st.markdown("선택한 도시 주변의 지진 발생 기록을 확인하고, 유사시 대피할 수 있는 안전지대(대피소)를 탐색하세요.")
+st.title("🌍 지진 반경 탐색기 & 실시간 대피 정보")
+st.markdown("지도의 지진 아이콘을 클릭하면 지도 아래에 **상세 상황 및 대피소 정보**가 나타납니다.")
 
 # --- 지진 규모별 상황 및 대피 요령 함수 ---
 def get_magnitude_info(mag):
@@ -28,7 +28,6 @@ def get_magnitude_info(mag):
 # --- 오픈스트리트맵(OSM) 대피소(학교/공원) 데이터 호출 함수 ---
 @st.cache_data(show_spinner="주변 대피소 정보를 불러오는 중...")
 def fetch_shelters(lat, lon, radius_m=5000):
-    # 도시 중심 반경 5km 이내의 학교(school)와 공원(park)을 최대 30개 검색
     overpass_url = "http://overpass-api.de/api/interpreter"
     overpass_query = f"""
     [out:json];
@@ -36,7 +35,7 @@ def fetch_shelters(lat, lon, radius_m=5000):
       node["amenity"="school"](around:{radius_m},{lat},{lon});
       node["leisure"="park"](around:{radius_m},{lat},{lon});
     );
-    out center limit 30;
+    out center limit 15;
     """
     try:
         response = requests.get(overpass_url, params={'data': overpass_query})
@@ -44,7 +43,6 @@ def fetch_shelters(lat, lon, radius_m=5000):
         if response.status_code == 200:
             data = response.json()
             for el in data.get('elements', []):
-                # 이름이 없는 경우 기본값 지정
                 name = el.get('tags', {}).get('name', '지정 대피 구역 (학교/공원)')
                 shelters.append({
                     "name": name,
@@ -77,8 +75,6 @@ last_year = today - timedelta(days=365)
 start_date = st.sidebar.date_input("🗓️ 시작일", last_year)
 end_date = st.sidebar.date_input("🗓️ 종료일", today)
 
-show_shelter = st.sidebar.checkbox("🏥 도시 중심 주변 대피소 보기 (반경 5km)", value=True)
-
 # --- USGS API 데이터 호출 함수 ---
 @st.cache_data(show_spinner="지진 데이터를 분석 중입니다...")
 def fetch_earthquake_data(lat, lon, radius, min_magnitude, start, end):
@@ -103,6 +99,7 @@ def fetch_earthquake_data(lat, lon, radius, min_magnitude, start, end):
             props = f["properties"]
             coords = f["geometry"]["coordinates"]
             eq_list.append({
+                "id": f["id"], # 클릭 감지를 위한 고유 ID 추가
                 "place": props["place"],
                 "magnitude": props["mag"],
                 "time": datetime.fromtimestamp(props["time"]/1000).strftime("%Y-%m-%d %H:%M"),
@@ -116,9 +113,8 @@ def fetch_earthquake_data(lat, lon, radius, min_magnitude, start, end):
 # 데이터 불러오기
 df = fetch_earthquake_data(lat, lon, radius_km, min_mag, start_date, end_date)
 
-# --- 대시보드 요약 통계 ---
-st.subheader(f"📊 {selected_city} 반경 {radius_km}km 분석 및 대처 방안")
-
+# --- 상단 대시보드 요약 통계 ---
+st.subheader(f"📊 {selected_city} 반경 {radius_km}km 요약 통계")
 col1, col2, col3 = st.columns(3)
 if not df.empty:
     col1.metric("총 발생 건수", f"{len(df)} 건")
@@ -141,15 +137,13 @@ folium.Circle(
     color="blue",
     fill=True,
     fill_color="blue",
-    fill_opacity=0.05,
+    fill_opacity=0.03,
 ).add_to(m)
 
-# 1. 지진 데이터 마커 추가
+# 지진 데이터 마커 추가
 if not df.empty:
     for _, row in df.iterrows():
         mag = row['magnitude']
-        situation, action = get_magnitude_info(mag) # 규모별 정보 가져오기
-        
         if mag >= 6.0:
             color = "red"
         elif mag >= 4.5:
@@ -157,19 +151,7 @@ if not df.empty:
         else:
             color = "green"
             
-        # HTML을 사용하여 팝업(클릭 시 나오는 창) 내용 풍성하게 구성
-        popup_html = f"""
-        <div style='width: 300px'>
-            <h4 style='margin-bottom:5px; color:{color};'>규모 {mag} 지진 발생</h4>
-            <b>📍 장소:</b> {row['place']}<br>
-            <b>🕒 시간:</b> {row['time']}<br>
-            <b>📏 깊이:</b> {row['depth']}km<br>
-            <hr style='margin: 10px 0;'>
-            <b>⚠️ 예상 상황:</b> {situation}<br>
-            <b>🏃‍♂️ 대피 요령:</b> <span style='color: blue;'>{action}</span>
-        </div>
-        """
-        
+        # 팝업 대신 지도 하단 출력을 위해 팝업 제거 및 layer_id 설정
         folium.CircleMarker(
             location=[row['latitude'], row['longitude']],
             radius=mag * 2.5,
@@ -177,20 +159,64 @@ if not df.empty:
             fill=True,
             fill_color=color,
             fill_opacity=0.6,
-            popup=folium.Popup(popup_html, max_width=350)
+            # 마우스를 올렸을 때 간단한 힌트만 제공
+            tooltip=f"규모 {mag} - 클릭하여 상세 정보 보기"
         ).add_to(m)
 
-# 2. 대피소 마커 추가
-if show_shelter:
-    shelters = fetch_shelters(lat, lon)
-    for s in shelters:
-        # tooltip 옵션이 마우스를 '가져다 댈 때' 텍스트를 보여줍니다.
-        folium.Marker(
-            location=[s['lat'], s['lon']],
-            tooltip=f"🟢 대피소: {s['name']}",
-            icon=folium.Icon(color="green", icon="info-sign")
-        ).add_to(m)
+# 스트림릿에 지도 출력 및 사용자 클릭 이벤트 캡처
+map_data = st_folium(m, width=1000, height=500, key="earthquake_map")
 
-st_folium(m, width=1000, height=600)
+st.markdown("---")
 
-st.info("💡 **이용 방법:** 빨간/주황/초록색 **원을 클릭**하면 지진 발생 상황과 행동 요령을 볼 수 있습니다. 초록색 **마커에 마우스를 올리면** 주변 대피소 이름을 확인할 수 있습니다.")
+# --- 지도 하단 상세 정보 대시보드 ---
+st.subheader("📋 선택한 지역의 상세 정보 및 대피 안내")
+
+# 사용자가 지도의 마커를 클릭했는지 확인하는 로직
+clicked_marker = None
+if map_data and map_data.get("last_object_clicked"):
+    click_lat = map_data["last_object_clicked"]["lat"]
+    click_lon = map_data["last_object_clicked"]["lng"]
+    
+    # 클릭한 좌표와 일치하는 지진 데이터 필터링 (미세한 소수점 오차 방지를 위해 round 적용)
+    if not df.empty:
+        matched = df[
+            (df['latitude'].round(3) == round(click_lat, 3)) & 
+            (df['longitude'].round(3) == round(click_lon, 3))
+        ]
+        if not matched.empty:
+            clicked_marker = matched.iloc[0]
+
+# 마커가 클릭되었다면 상세 대시보드 출력
+if clicked_marker is not None:
+    mag = clicked_marker['magnitude']
+    situation, action = get_magnitude_info(mag)
+    
+    # 레이아웃 분할 (상황/대피요령 vs 주변 대피소 리스트)
+    detail_col1, detail_col2 = st.columns([2, 1])
+    
+    with detail_col1:
+        st.markdown(f"### 🚨 규모 {mag} 지진 상세 정보")
+        st.write(f"**📍 발생 위치:** {clicked_marker['place']}")
+        st.write(f"**🕒 발생 시각:** {clicked_marker['time']}")
+        st.write(f"**📏 진원 깊이:** {clicked_marker['depth']} km")
+        
+        # 시각적 구분을 위한 안내 박스
+        st.error(f"**⚠️ 예상되는 상황:**\n\n{situation}")
+        st.success(f"**🏃‍♂️ 권장 대피 요령:**\n\n{action}")
+        
+    with detail_col2:
+        st.markdown("### 🏥 인근 대피 구역 (학교/공원)")
+        st.caption("발생지 기준 반경 5km 이내의 안전 지역 목록입니다.")
+        
+        # 지진 발생지 주변 대피소 검색
+        local_shelters = fetch_shelters(clicked_marker['latitude'], clicked_marker['longitude'])
+        
+        if local_shelters:
+            for idx, shelter in enumerate(local_shelters, 1):
+                st.markdown(f"**{idx}. {shelter['name']}**")
+        else:
+            st.info("반경 5km 내에 등록된 대피 구역 정보가 없습니다. 넓은 공터로 대피하세요.")
+            
+else:
+    # 아무것도 클릭하지 않았을 때의 초기 상태 안내
+    st.info("🗺️ 위의 지도에서 지진 마커(초록/주황/빨간 원)를 클릭하시면 해당 지역의 실시간 재난 상황과 대피소 목록이 이곳에 표시됩니다.")
